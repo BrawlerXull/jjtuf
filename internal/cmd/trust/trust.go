@@ -263,17 +263,15 @@ func loadRootMetadata(repo *gitinterface.Repository) (*tufv01.RootMetadata, erro
 		return nil, fmt.Errorf("jjtuf not initialized: %w", err)
 	}
 
-	rootBlobID, err := repo.GetPathIDInTree(rootMetadataPath, policyTipID)
+	// Get the tree from the policy commit
+	treeID, err := repo.GetCommitTreeID(policyTipID)
 	if err != nil {
-		// Try with tree from commit
-		treeID, err2 := repo.GetCommitTreeID(policyTipID)
-		if err2 != nil {
-			return nil, fmt.Errorf("reading policy tree: %w", err2)
-		}
-		rootBlobID, err = repo.GetPathIDInTree(rootMetadataPath, treeID)
-		if err != nil {
-			return nil, fmt.Errorf("root metadata not found in policy: %w", err)
-		}
+		return nil, fmt.Errorf("reading policy tree: %w", err)
+	}
+
+	rootBlobID, err := repo.GetPathIDInTree(rootMetadataPath, treeID)
+	if err != nil {
+		return nil, fmt.Errorf("root metadata not found in policy: %w", err)
 	}
 
 	envBytes, err := repo.ReadBlob(rootBlobID)
@@ -320,7 +318,7 @@ func saveRootMetadata(repo *gitinterface.Repository, rootMd *tufv01.RootMetadata
 		return err
 	}
 
-	_, err = repo.Commit(treeID, policyStagingRef, "Update root of trust metadata", false)
+	_, err = repo.Commit(treeID, policyRef, "Update root of trust metadata", false)
 	return err
 }
 
