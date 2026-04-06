@@ -6,6 +6,7 @@ package root
 import (
 	"github.com/spf13/cobra"
 
+	"github.com/jjtuf/jjtuf/internal/cmd/attest"
 	"github.com/jjtuf/jjtuf/internal/cmd/osl"
 	"github.com/jjtuf/jjtuf/internal/cmd/policy"
 	"github.com/jjtuf/jjtuf/internal/cmd/trust"
@@ -29,6 +30,7 @@ operation-based architecture.`,
 	cmd.AddCommand(trust.New())
 	cmd.AddCommand(policy.New())
 	cmd.AddCommand(osl.New())
+	cmd.AddCommand(attest.New())
 	cmd.AddCommand(verify.New())
 	cmd.AddCommand(versionCmd())
 

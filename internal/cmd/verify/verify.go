@@ -24,6 +24,7 @@ latest entry, full history, or assess merge readiness.`,
 	}
 
 	cmd.AddCommand(refCmd())
+	cmd.AddCommand(mergeableCmd())
 
 	return cmd
 }
@@ -103,6 +104,57 @@ func refCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&full, "full", false, "Verify full history from first entry")
+
+	return cmd
+}
+
+func mergeableCmd() *cobra.Command {
+	var target string
+	var feature string
+
+	cmd := &cobra.Command{
+		Use:   "mergeable",
+		Short: "Check if a feature bookmark can be merged into a target",
+		Long: `Verify that sufficient authorizations and approvals exist for
+merging the feature bookmark into the target bookmark. Returns
+whether the merge is allowed and if an authorized signature is
+needed on the OSL entry.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+
+			jjRepo, err := jjinterface.LoadJJRepository(cwd)
+			if err != nil {
+				return fmt.Errorf("loading jj repository: %w", err)
+			}
+
+			gitRepo := jjRepo.GetGitRepository()
+			verifier := policy.NewPolicyVerifier(gitRepo)
+
+			needsSignature, err := verifier.VerifyMergeable(target, feature)
+			if err != nil {
+				cmd.Printf("FAIL Cannot merge %q into %q\n", feature, target)
+				return err
+			}
+
+			if needsSignature {
+				cmd.Printf("OK Merge %q -> %q is allowed (authorized OSL entry signature required)\n",
+					feature, target)
+			} else {
+				cmd.Printf("OK Merge %q -> %q is allowed (anyone can perform the merge)\n",
+					feature, target)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&target, "target", "", "Target bookmark to merge into (required)")
+	cmd.Flags().StringVar(&feature, "feature", "", "Feature bookmark to merge (required)")
+	_ = cmd.MarkFlagRequired("target")
+	_ = cmd.MarkFlagRequired("feature")
 
 	return cmd
 }

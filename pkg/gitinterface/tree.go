@@ -116,15 +116,79 @@ func NewTreeBuilder(repo *Repository) *TreeBuilder {
 }
 
 // WriteRootTreeFromBlobIDs creates a tree from a map of path -> blobID.
-// All entries are created as blobs at the root level.
+// Paths can contain slashes for nested directories (e.g., "a/b/c").
+// Nested directories are created automatically as subtrees.
 func (tb *TreeBuilder) WriteRootTreeFromBlobIDs(entries map[string]Hash) (Hash, error) {
 	if len(entries) == 0 {
 		return tb.repo.EmptyTree()
 	}
 
+	// Check if any paths have slashes (need nested tree building)
+	hasNested := false
+	for name := range entries {
+		if strings.Contains(name, "/") {
+			hasNested = true
+			break
+		}
+	}
+
+	if !hasNested {
+		return tb.writeFlatTree(entries)
+	}
+
+	return tb.writeNestedTree(entries)
+}
+
+// writeFlatTree creates a single-level tree.
+func (tb *TreeBuilder) writeFlatTree(entries map[string]Hash) (Hash, error) {
 	var lines []string
 	for name, blobID := range entries {
 		lines = append(lines, fmt.Sprintf("100644 blob %s\t%s", blobID.String(), name))
+	}
+
+	input := strings.Join(lines, "\n")
+	output, err := tb.repo.executorWithStdin(input, "mktree")
+	if err != nil {
+		return ZeroHash, fmt.Errorf("creating tree: %w", err)
+	}
+
+	return NewHash(strings.TrimSpace(output))
+}
+
+// writeNestedTree creates a tree with nested subdirectories.
+// It groups entries by their top-level directory, recursively builds
+// subtrees, and assembles them into the root tree.
+func (tb *TreeBuilder) writeNestedTree(entries map[string]Hash) (Hash, error) {
+	// Group entries: top-level blobs and subdirectory contents
+	topBlobs := make(map[string]Hash)        // name -> blobID
+	subdirs := make(map[string]map[string]Hash) // dirname -> {subpath -> blobID}
+
+	for fullPath, blobID := range entries {
+		slashIdx := strings.Index(fullPath, "/")
+		if slashIdx < 0 {
+			topBlobs[fullPath] = blobID
+		} else {
+			dirName := fullPath[:slashIdx]
+			subPath := fullPath[slashIdx+1:]
+			if subdirs[dirName] == nil {
+				subdirs[dirName] = make(map[string]Hash)
+			}
+			subdirs[dirName][subPath] = blobID
+		}
+	}
+
+	// Build each subdirectory tree recursively
+	var lines []string
+	for name, blobID := range topBlobs {
+		lines = append(lines, fmt.Sprintf("100644 blob %s\t%s", blobID.String(), name))
+	}
+
+	for dirName, subEntries := range subdirs {
+		subtreeID, err := tb.WriteRootTreeFromBlobIDs(subEntries)
+		if err != nil {
+			return ZeroHash, fmt.Errorf("creating subtree %s: %w", dirName, err)
+		}
+		lines = append(lines, fmt.Sprintf("040000 tree %s\t%s", subtreeID.String(), dirName))
 	}
 
 	input := strings.Join(lines, "\n")

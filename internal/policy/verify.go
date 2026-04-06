@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/jjtuf/jjtuf/internal/attestations"
 	"github.com/jjtuf/jjtuf/internal/osl"
 	"github.com/jjtuf/jjtuf/pkg/gitinterface"
 )
@@ -151,6 +152,12 @@ func (v *PolicyVerifier) verifyEntry(entry *osl.OperationEntry, target string) (
 			continue
 		}
 
+		// Load attestation signatures for this bookmark transition
+		currentAttestations, err := attestations.LoadCurrentAttestations(v.repo)
+		if err != nil {
+			slog.Debug(fmt.Sprintf("Could not load attestations: %v", err))
+		}
+
 		// Check each matching rule
 		for _, rule := range rules {
 			verifier := NewSignatureVerifier(rule, state)
@@ -161,8 +168,21 @@ func (v *PolicyVerifier) verifyEntry(entry *osl.OperationEntry, target string) (
 				signerKeyIDs = append(signerKeyIDs, signerKeyID)
 			}
 
-			// TODO: Also collect signatures from attestations
-			// (Phase 3 feature)
+			// Collect signer IDs from attestations
+			if currentAttestations != nil && delta.FromID != "" && delta.ToID != "" {
+				// Try to find a reference authorization for this transition
+				// We need the tree ID of the target commit, not the commit ID
+				toTreeID := delta.ToID
+				if toCommitTreeID, err := v.repo.GetCommitTreeID(gitinterface.Hash(toTreeID)); err == nil {
+					toTreeID = toCommitTreeID.String()
+				}
+
+				authKeyIDs, err := currentAttestations.GetSignerKeyIDsForAuthorization(
+					v.repo, delta.Name, delta.FromID, toTreeID)
+				if err == nil {
+					signerKeyIDs = append(signerKeyIDs, authKeyIDs...)
+				}
+			}
 
 			err := verifier.Verify(signerKeyIDs)
 			if err != nil {
@@ -249,4 +269,101 @@ func (v *PolicyVerifier) VerifyFileChanges(state *State, fromCommitID, toCommitI
 	}
 
 	return violations, nil
+}
+
+// VerifyMergeable checks if the feature bookmark can be merged into the target
+// bookmark. It verifies that sufficient authorizations exist for the merge.
+// Returns (needsRSLSignature, error):
+//   - (false, nil): merge allowed, anyone can perform it
+//   - (true, nil): merge allowed but must be performed by an authorized principal
+//   - (false, err): merge not allowed
+func (v *PolicyVerifier) VerifyMergeable(targetBookmark, featureBookmark string) (bool, error) {
+	state, err := LoadCurrentState(v.repo)
+	if err != nil {
+		return false, fmt.Errorf("loading policy: %w", err)
+	}
+
+	if state.TargetsMetadata == nil {
+		return false, nil // No policy, anyone can merge
+	}
+
+	namespace := fmt.Sprintf("bookmark:%s", targetBookmark)
+	rules := state.FindRulesForNamespace(namespace)
+	if len(rules) == 0 {
+		return false, nil // No rules protect target, anyone can merge
+	}
+
+	// Find the current state of target and feature bookmarks from the OSL
+	targetEntry, err := osl.GetLatestOperationEntryFor(v.repo, targetBookmark)
+	var targetID string
+	if err == nil {
+		for _, delta := range targetEntry.BookmarkDeltas {
+			if delta.Name == targetBookmark {
+				targetID = delta.ToID
+				break
+			}
+		}
+	}
+
+	featureEntry, err := osl.GetLatestOperationEntryFor(v.repo, featureBookmark)
+	if err != nil {
+		return false, fmt.Errorf("no OSL entry for feature bookmark %q: %w", featureBookmark, err)
+	}
+	var featureID string
+	for _, delta := range featureEntry.BookmarkDeltas {
+		if delta.Name == featureBookmark {
+			featureID = delta.ToID
+			break
+		}
+	}
+
+	// Load attestations
+	currentAttestations, err := attestations.LoadCurrentAttestations(v.repo)
+	if err != nil {
+		return false, fmt.Errorf("loading attestations: %w", err)
+	}
+
+	// Check if there are sufficient attestation signatures for the merge
+	// Try to get tree ID for the feature commit
+	featureTreeID := featureID
+	if h, err := gitinterface.NewHash(featureID); err == nil {
+		if treeH, err := v.repo.GetCommitTreeID(h); err == nil {
+			featureTreeID = treeH.String()
+		}
+	}
+
+	authKeyIDs, _ := currentAttestations.GetSignerKeyIDsForAuthorization(
+		v.repo, targetBookmark, targetID, featureTreeID)
+
+	// Check each rule
+	needsOSLSignature := false
+	for _, rule := range rules {
+		verifier := NewSignatureVerifier(rule, state)
+
+		// Check if attestation signatures alone meet the threshold
+		if len(authKeyIDs) > 0 {
+			err := verifier.Verify(authKeyIDs)
+			if err == nil {
+				continue // This rule is fully satisfied by attestations
+			}
+		}
+
+		// Attestations alone don't meet the threshold — the OSL entry
+		// signer must also be authorized
+		if rule.Threshold() == 1 && len(authKeyIDs) == 0 {
+			needsOSLSignature = true
+			continue
+		}
+
+		// For threshold > 1, check if attestations + 1 more signer would suffice
+		if len(authKeyIDs)+1 >= rule.Threshold() {
+			needsOSLSignature = true
+			continue
+		}
+
+		return false, fmt.Errorf("%w: insufficient authorizations for rule %q (need %d, have %d attestation signatures)",
+			ErrVerificationFailed, rule.ID(), rule.Threshold(), len(authKeyIDs))
+	}
+
+	return needsOSLSignature, nil
 }
