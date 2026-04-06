@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
+	"strings"
 
 	"github.com/jjtuf/jjtuf/internal/attestations"
 	"github.com/jjtuf/jjtuf/internal/osl"
@@ -128,6 +130,42 @@ func (v *PolicyVerifier) verifyEntry(entry *osl.OperationEntry, target string) (
 	if state.TargetsMetadata == nil {
 		slog.Debug("No policy rules defined, verification passes by default")
 		return result, nil
+	}
+
+	// Check global rules first
+	globalRules := state.RootMetadata.GetGlobalRules()
+	for _, delta := range entry.BookmarkDeltas {
+		if delta.Name != target {
+			continue
+		}
+
+		// Check block-force-pushes global rule
+		if blockRules, exists := globalRules["block-force-pushes"]; exists {
+			for _, rule := range blockRules {
+				namespace := fmt.Sprintf("bookmark:%s", delta.Name)
+				for _, pattern := range rule.Patterns() {
+					if matchesNamespace(pattern, namespace) {
+						// A force push is detected when FromID is non-empty but
+						// the new commit is not a descendant of the old commit
+						if delta.FromID != "" && delta.ToID != "" && !delta.Conflict {
+							fromHash, err1 := gitinterface.NewHash(delta.FromID)
+							toHash, err2 := gitinterface.NewHash(delta.ToID)
+							if err1 == nil && err2 == nil {
+								isDescendant, err := v.repo.KnowsCommit(toHash, fromHash)
+								if err == nil && !isDescendant {
+									result.Passed = false
+									result.Violations = append(result.Violations, Violation{
+										BookmarkName: delta.Name,
+										RuleName:     rule.Name(),
+										Message:      fmt.Sprintf("global rule %q: force push blocked on %s", rule.Name(), delta.Name),
+									})
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Get the signing key ID from the OSL entry's commit
@@ -366,4 +404,28 @@ func (v *PolicyVerifier) VerifyMergeable(targetBookmark, featureBookmark string)
 	}
 
 	return needsOSLSignature, nil
+}
+
+// matchesNamespace checks if a pattern matches a namespace using glob matching.
+func matchesNamespace(pattern, namespace string) bool {
+	if pattern == namespace {
+		return true
+	}
+
+	patternParts := strings.SplitN(pattern, ":", 2)
+	namespaceParts := strings.SplitN(namespace, ":", 2)
+
+	if len(patternParts) != 2 || len(namespaceParts) != 2 {
+		return false
+	}
+
+	if patternParts[0] != namespaceParts[0] {
+		return false
+	}
+
+	matched, err := filepath.Match(patternParts[1], namespaceParts[1])
+	if err != nil {
+		return false
+	}
+	return matched
 }

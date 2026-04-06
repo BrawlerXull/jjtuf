@@ -31,6 +31,7 @@ signatures required.`,
 	cmd.AddCommand(initPolicyCmd())
 	cmd.AddCommand(addPrincipalCmd())
 	cmd.AddCommand(addRuleCmd())
+	cmd.AddCommand(updateRuleCmd())
 	cmd.AddCommand(removeRuleCmd())
 	cmd.AddCommand(listRulesCmd())
 	cmd.AddCommand(applyCmd())
@@ -207,6 +208,61 @@ and requires signatures from specified principals.`,
 	_ = cmd.MarkFlagRequired("name")
 	_ = cmd.MarkFlagRequired("patterns")
 	_ = cmd.MarkFlagRequired("principals")
+
+	return cmd
+}
+
+func updateRuleCmd() *cobra.Command {
+	var (
+		name       string
+		patterns   []string
+		principals []string
+		threshold  int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "update-rule",
+		Short: "Update an existing policy rule",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+
+			jjRepo, err := jjinterface.LoadJJRepository(cwd)
+			if err != nil {
+				return fmt.Errorf("loading jj repository: %w", err)
+			}
+
+			gitRepo := jjRepo.GetGitRepository()
+
+			root, targets, err := loadStagedOrActivePolicy(gitRepo)
+			if err != nil {
+				return err
+			}
+
+			if targets == nil {
+				return fmt.Errorf("no rule file found")
+			}
+
+			if err := targets.UpdateRule(name, principals, patterns, threshold); err != nil {
+				return fmt.Errorf("updating rule: %w", err)
+			}
+
+			if err := saveTargetsToStaging(gitRepo, root, targets); err != nil {
+				return err
+			}
+
+			cmd.Printf("Updated rule %q in policy staging.\n", name)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&name, "name", "", "Rule name to update (required)")
+	cmd.Flags().StringSliceVar(&patterns, "patterns", nil, "New namespace patterns")
+	cmd.Flags().StringSliceVar(&principals, "principals", nil, "New authorized principals")
+	cmd.Flags().IntVar(&threshold, "threshold", 0, "New threshold")
+	_ = cmd.MarkFlagRequired("name")
 
 	return cmd
 }

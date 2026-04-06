@@ -32,6 +32,9 @@ func New() *cobra.Command {
 
 	cmd.AddCommand(initCmd())
 	cmd.AddCommand(addRootKeyCmd())
+	cmd.AddCommand(addGlobalRuleCmd())
+	cmd.AddCommand(removeGlobalRuleCmd())
+	cmd.AddCommand(updateThresholdCmd())
 	cmd.AddCommand(inspectCmd())
 
 	return cmd
@@ -192,6 +195,163 @@ func addRootKeyCmd() *cobra.Command {
 
 	return cmd
 }
+
+func addGlobalRuleCmd() *cobra.Command {
+	var (
+		name     string
+		ruleType string
+		patterns []string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "add-global-rule",
+		Short: "Add a global rule to the root of trust",
+		Long: `Global rules apply repository-wide. Supported types:
+  block-force-pushes: Prevent non-fast-forward updates to matching bookmarks
+  threshold: Enforce a minimum signature threshold globally`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+
+			jjRepo, err := jjinterface.LoadJJRepository(cwd)
+			if err != nil {
+				return fmt.Errorf("loading jj repository: %w", err)
+			}
+
+			rootMd, err := loadRootMetadata(jjRepo.GetGitRepository())
+			if err != nil {
+				return err
+			}
+
+			rule := &simpleGlobalRule{name: name, ruleType: ruleType, patterns: patterns}
+			if err := rootMd.AddGlobalRule(rule); err != nil {
+				return fmt.Errorf("adding global rule: %w", err)
+			}
+
+			if err := saveRootMetadata(jjRepo.GetGitRepository(), rootMd); err != nil {
+				return err
+			}
+
+			cmd.Printf("Added global rule %q (type: %s, patterns: %v)\n", name, ruleType, patterns)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&name, "name", "", "Rule name (required)")
+	cmd.Flags().StringVar(&ruleType, "type", "block-force-pushes", "Rule type (block-force-pushes or threshold)")
+	cmd.Flags().StringSliceVar(&patterns, "patterns", nil, "Namespace patterns to apply (e.g., bookmark:main)")
+	_ = cmd.MarkFlagRequired("name")
+	_ = cmd.MarkFlagRequired("patterns")
+
+	return cmd
+}
+
+func removeGlobalRuleCmd() *cobra.Command {
+	var name string
+
+	cmd := &cobra.Command{
+		Use:   "remove-global-rule",
+		Short: "Remove a global rule from the root of trust",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+
+			jjRepo, err := jjinterface.LoadJJRepository(cwd)
+			if err != nil {
+				return fmt.Errorf("loading jj repository: %w", err)
+			}
+
+			rootMd, err := loadRootMetadata(jjRepo.GetGitRepository())
+			if err != nil {
+				return err
+			}
+
+			if err := rootMd.DeleteGlobalRule(name); err != nil {
+				return fmt.Errorf("removing global rule: %w", err)
+			}
+
+			if err := saveRootMetadata(jjRepo.GetGitRepository(), rootMd); err != nil {
+				return err
+			}
+
+			cmd.Printf("Removed global rule %q\n", name)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&name, "name", "", "Rule name to remove (required)")
+	_ = cmd.MarkFlagRequired("name")
+
+	return cmd
+}
+
+func updateThresholdCmd() *cobra.Command {
+	var (
+		rootThreshold   int
+		policyThreshold int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "update-threshold",
+		Short: "Update root or policy signature thresholds",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+
+			jjRepo, err := jjinterface.LoadJJRepository(cwd)
+			if err != nil {
+				return fmt.Errorf("loading jj repository: %w", err)
+			}
+
+			rootMd, err := loadRootMetadata(jjRepo.GetGitRepository())
+			if err != nil {
+				return err
+			}
+
+			if rootThreshold > 0 {
+				if err := rootMd.UpdateRootThreshold(rootThreshold); err != nil {
+					return fmt.Errorf("updating root threshold: %w", err)
+				}
+				cmd.Printf("Root threshold updated to %d\n", rootThreshold)
+			}
+
+			if policyThreshold > 0 {
+				if err := rootMd.UpdatePrimaryRuleFileThreshold(policyThreshold); err != nil {
+					return fmt.Errorf("updating policy threshold: %w", err)
+				}
+				cmd.Printf("Policy threshold updated to %d\n", policyThreshold)
+			}
+
+			if rootThreshold <= 0 && policyThreshold <= 0 {
+				return fmt.Errorf("specify --root-threshold or --policy-threshold")
+			}
+
+			return saveRootMetadata(jjRepo.GetGitRepository(), rootMd)
+		},
+	}
+
+	cmd.Flags().IntVar(&rootThreshold, "root-threshold", 0, "New threshold for root metadata changes")
+	cmd.Flags().IntVar(&policyThreshold, "policy-threshold", 0, "New threshold for policy rule file changes")
+
+	return cmd
+}
+
+// simpleGlobalRule implements tuf.GlobalRule for CLI use.
+type simpleGlobalRule struct {
+	name     string
+	ruleType string
+	patterns []string
+}
+
+func (r *simpleGlobalRule) Type() string       { return r.ruleType }
+func (r *simpleGlobalRule) Name() string       { return r.name }
+func (r *simpleGlobalRule) Patterns() []string { return r.patterns }
 
 func inspectCmd() *cobra.Command {
 	return &cobra.Command{

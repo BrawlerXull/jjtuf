@@ -150,6 +150,9 @@ func (r *RootMetadata) UpdatePrimaryRuleFileThreshold(threshold int) error {
 }
 
 func (r *RootMetadata) AddGlobalRule(rule tuf.GlobalRule) error {
+	if r.GlobalRulesMap == nil {
+		r.GlobalRulesMap = make(map[string][]globalRule)
+	}
 	ruleType := rule.Type()
 	for _, existing := range r.GlobalRulesMap[ruleType] {
 		if existing.RuleName == rule.Name() {
@@ -165,6 +168,9 @@ func (r *RootMetadata) AddGlobalRule(rule tuf.GlobalRule) error {
 }
 
 func (r *RootMetadata) DeleteGlobalRule(name string) error {
+	if r.GlobalRulesMap == nil {
+		return tuf.ErrGlobalRuleNotFound
+	}
 	for ruleType, rules := range r.GlobalRulesMap {
 		for i, rule := range rules {
 			if rule.RuleName == name {
@@ -178,6 +184,9 @@ func (r *RootMetadata) DeleteGlobalRule(name string) error {
 
 func (r *RootMetadata) GetGlobalRules() map[string][]tuf.GlobalRule {
 	result := make(map[string][]tuf.GlobalRule)
+	if r.GlobalRulesMap == nil {
+		return result
+	}
 	for ruleType, rules := range r.GlobalRulesMap {
 		for _, rule := range rules {
 			result[ruleType] = append(result[ruleType], &rule)
