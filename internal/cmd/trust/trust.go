@@ -470,10 +470,25 @@ func saveRootMetadata(repo *gitinterface.Repository, rootMd *tufv01.RootMetadata
 		return err
 	}
 
-	tb := gitinterface.NewTreeBuilder(repo)
-	treeID, err := tb.WriteRootTreeFromBlobIDs(map[string]gitinterface.Hash{
+	// Preserve existing entries in the policy tree (e.g., targets metadata)
+	entries := map[string]gitinterface.Hash{
 		rootMetadataPath: rootBlobID,
-	})
+	}
+
+	policyTipID, err := repo.GetReference(policyRef)
+	if err == nil {
+		treeID, err := repo.GetCommitTreeID(policyTipID)
+		if err == nil {
+			// Check if targets blob exists and preserve it
+			targetsBlobID, err := repo.GetPathIDInTree("targets", treeID)
+			if err == nil {
+				entries["targets"] = targetsBlobID
+			}
+		}
+	}
+
+	tb := gitinterface.NewTreeBuilder(repo)
+	treeID, err := tb.WriteRootTreeFromBlobIDs(entries)
 	if err != nil {
 		return err
 	}
