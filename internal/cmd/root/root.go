@@ -7,8 +7,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jjtuf/jjtuf/internal/cmd/attest"
+	"github.com/jjtuf/jjtuf/internal/cmd/cache"
 	"github.com/jjtuf/jjtuf/internal/cmd/osl"
 	"github.com/jjtuf/jjtuf/internal/cmd/policy"
+	"github.com/jjtuf/jjtuf/internal/cmd/sync"
 	"github.com/jjtuf/jjtuf/internal/cmd/trust"
 	"github.com/jjtuf/jjtuf/internal/cmd/verify"
 )
@@ -32,6 +34,8 @@ operation-based architecture.`,
 	cmd.AddCommand(osl.New())
 	cmd.AddCommand(attest.New())
 	cmd.AddCommand(verify.New())
+	cmd.AddCommand(sync.New())
+	cmd.AddCommand(cache.New())
 	cmd.AddCommand(versionCmd())
 
 	return cmd
