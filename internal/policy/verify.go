@@ -180,6 +180,18 @@ func (v *PolicyVerifier) verifyEntry(entry *osl.OperationEntry, target string) (
 			continue
 		}
 
+		// Flag conflicted bookmarks
+		if delta.Conflict {
+			slog.Debug(fmt.Sprintf("Bookmark %s is in conflict state", delta.Name))
+			result.Violations = append(result.Violations, Violation{
+				BookmarkName: delta.Name,
+				RuleName:     "(conflict)",
+				Message:      fmt.Sprintf("bookmark %q is in conflict state — all conflict sides must be authorized before resolution", delta.Name),
+			})
+			// Don't mark as failed yet — conflicts are warnings until resolved
+			// But if there are protecting rules, we still check them
+		}
+
 		namespace := fmt.Sprintf("bookmark:%s", delta.Name)
 		slog.Debug(fmt.Sprintf("Finding rules for namespace '%s'...", namespace))
 

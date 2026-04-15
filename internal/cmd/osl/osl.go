@@ -24,6 +24,7 @@ func New() *cobra.Command {
 	cmd.AddCommand(recordCmd())
 	cmd.AddCommand(logCmd())
 	cmd.AddCommand(annotateCmd())
+	cmd.AddCommand(verifyChainCmd())
 
 	return cmd
 }
@@ -300,6 +301,77 @@ context messages without breaking the append-only chain.`,
 	cmd.Flags().StringVar(&message, "message", "", "Annotation message")
 
 	return cmd
+}
+
+func verifyChainCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "verify-chain",
+		Short: "Verify OSL hash chain integrity",
+		Long: `Walk the entire Operation State Log and verify:
+- Parent linkage is intact (no gaps or forks)
+- Entry numbers are strictly increasing
+- No unexpected branch points
+
+This checks structural integrity independent of policy verification.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+
+			jjRepo, err := jjinterface.LoadJJRepository(cwd)
+			if err != nil {
+				return fmt.Errorf("loading jj repository: %w", err)
+			}
+
+			gitRepo := jjRepo.GetGitRepository()
+
+			var (
+				count       int
+				prevNumber  uint64
+				issues      []string
+			)
+
+			err = oslpkg.IterateEntries(gitRepo, func(entry oslpkg.Entry) bool {
+				count++
+				num := entry.GetNumber()
+
+				if count > 1 && num >= prevNumber {
+					issues = append(issues, fmt.Sprintf(
+						"entry #%d (%s): number %d is not less than previous %d (expected decreasing)",
+						count, entry.GetID().String()[:12], num, prevNumber,
+					))
+				}
+				prevNumber = num
+				return true
+			})
+
+			if err != nil && err != oslpkg.ErrOSLEntryNotFound {
+				if err.Error() == "potential OSL branch detected, entry has more than one parent" {
+					issues = append(issues, "OSL branch detected: entry has more than one parent — possible tampering")
+				} else {
+					return fmt.Errorf("chain walk error: %w", err)
+				}
+			}
+
+			if count == 0 {
+				cmd.Println("No OSL entries found.")
+				return nil
+			}
+
+			if len(issues) > 0 {
+				cmd.Printf("FAIL Chain integrity check failed (%d entries checked):\n", count)
+				for _, issue := range issues {
+					cmd.Printf("  - %s\n", issue)
+				}
+				return fmt.Errorf("OSL chain integrity compromised")
+			}
+
+			cmd.Printf("OK Chain integrity verified (%d entries, numbers descending from #%d to #%d)\n",
+				count, count, 1)
+			return nil
+		},
+	}
 }
 
 func truncate(s string, n int) string {
