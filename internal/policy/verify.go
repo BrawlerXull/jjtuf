@@ -12,6 +12,7 @@ import (
 
 	"github.com/jjtuf/jjtuf/internal/attestations"
 	"github.com/jjtuf/jjtuf/internal/osl"
+	"github.com/jjtuf/jjtuf/internal/signerverifier/common"
 	"github.com/jjtuf/jjtuf/pkg/gitinterface"
 )
 
@@ -126,13 +127,10 @@ func (v *PolicyVerifier) verifyEntry(entry *osl.OperationEntry, target string) (
 		return nil, fmt.Errorf("loading policy: %w", err)
 	}
 
-	// If no targets metadata (no rules defined), pass by default
-	if state.TargetsMetadata == nil {
-		slog.Debug("No policy rules defined, verification passes by default")
-		return result, nil
-	}
-
-	// Check global rules first
+	// Global rules live in root metadata and apply regardless of whether a
+	// targets/policy rule file has been initialized. Check them first so
+	// that a "global-rules only" deployment (e.g. block-force-pushes set
+	// at trust-init time, no policy apply) still enforces those rules.
 	globalRules := state.RootMetadata.GetGlobalRules()
 	for _, delta := range entry.BookmarkDeltas {
 		if delta.Name != target {
@@ -166,6 +164,14 @@ func (v *PolicyVerifier) verifyEntry(entry *osl.OperationEntry, target string) (
 				}
 			}
 		}
+	}
+
+	// If no targets metadata (no per-namespace rules defined), there are no
+	// signature/threshold checks to run. Global rules above have already had
+	// their say, so return whatever they produced.
+	if state.TargetsMetadata == nil {
+		slog.Debug("No policy targets defined; only global rules were evaluated")
+		return result, nil
 	}
 
 	// Get the signing key ID from the OSL entry's commit
@@ -218,17 +224,27 @@ func (v *PolicyVerifier) verifyEntry(entry *osl.OperationEntry, target string) (
 				signerKeyIDs = append(signerKeyIDs, signerKeyID)
 			}
 
-			// Collect signer IDs from attestations
-			if currentAttestations != nil && delta.FromID != "" && delta.ToID != "" {
-				// Try to find a reference authorization for this transition
-				// We need the tree ID of the target commit, not the commit ID
+			// Collect signer IDs from attestations (with cryptographic verification).
+			// delta.FromID may be empty for new bookmarks; we still check attestations.
+			if currentAttestations != nil && delta.ToID != "" {
 				toTreeID := delta.ToID
-				if toCommitTreeID, err := v.repo.GetCommitTreeID(gitinterface.Hash(toTreeID)); err == nil {
-					toTreeID = toCommitTreeID.String()
+				if commitHash, err := gitinterface.NewHash(toTreeID); err == nil {
+					if toCommitTreeID, err := v.repo.GetCommitTreeID(commitHash); err == nil {
+						toTreeID = toCommitTreeID.String()
+					}
+				}
+
+				// Gather all public keys from the principals in this rule so we
+				// can verify attestation signatures rather than trusting claimed IDs.
+				var policyKeys []*common.SSLibKey
+				for _, pid := range rule.GetPrincipalIDs() {
+					if p, ok := state.GetPrincipalByID(pid); ok {
+						policyKeys = append(policyKeys, p.Keys()...)
+					}
 				}
 
 				authKeyIDs, err := currentAttestations.GetSignerKeyIDsForAuthorization(
-					v.repo, delta.Name, delta.FromID, toTreeID)
+					v.repo, delta.Name, delta.FromID, toTreeID, policyKeys)
 				if err == nil {
 					signerKeyIDs = append(signerKeyIDs, authKeyIDs...)
 				}
@@ -278,10 +294,13 @@ func (v *PolicyVerifier) VerifyFileChanges(state *State, fromCommitID, toCommitI
 			return nil, fmt.Errorf("getting commit trees: %v / %v", err1, err2)
 		}
 
-		fromFiles, _ := v.repo.GetAllFilesInTree(fromTree)
+		fromFiles, err := v.repo.GetAllFilesInTree(fromTree)
+		if err != nil {
+			return nil, fmt.Errorf("listing files in from-tree: %w", err)
+		}
 		toFiles, err := v.repo.GetAllFilesInTree(toTree)
 		if err != nil {
-			return nil, fmt.Errorf("listing files: %w", err)
+			return nil, fmt.Errorf("listing files in to-tree: %w", err)
 		}
 
 		changedFiles = make(map[string]gitinterface.Hash)

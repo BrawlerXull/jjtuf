@@ -71,6 +71,15 @@ OSL entries for each non-snapshot operation.`,
 					continue
 				}
 
+				// Skip already-recorded operations to prevent duplicate entries
+				alreadyRecorded, err := oslpkg.IsOperationIDRecorded(gitRepo, opID)
+				if err != nil {
+					cmd.PrintErrf("Warning: could not check duplicate for %s: %v\n", opID[:12], err)
+				} else if alreadyRecorded {
+					cmd.Printf("Already recorded operation %s — skipping\n", opID[:12])
+					continue
+				}
+
 				// Compute view digest
 				viewDigest, err := jjRepo.ComputeViewDigest(op.ViewID)
 				if err != nil {

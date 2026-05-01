@@ -25,3 +25,9 @@ Thumbs.db
 
 # References (large cloned repos)
 references/
+
+# Editor / agent artifacts
+.claude/
+
+# Build artifacts from experimental/
+/tamper-attestation

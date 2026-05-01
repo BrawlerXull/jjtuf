@@ -13,6 +13,7 @@ import (
 	policyPkg "github.com/jjtuf/jjtuf/internal/policy"
 	"github.com/jjtuf/jjtuf/internal/signerverifier/common"
 	"github.com/jjtuf/jjtuf/internal/signerverifier/dsse"
+	"github.com/jjtuf/jjtuf/internal/signerverifier/loader"
 	tufv01 "github.com/jjtuf/jjtuf/internal/tuf/v01"
 	"github.com/jjtuf/jjtuf/pkg/gitinterface"
 )
@@ -403,7 +404,9 @@ func applyCmd() *cobra.Command {
 			}
 
 			// Clean up staging ref
-			_ = gitRepo.DeleteReference(policyPkg.PolicyStagingRef)
+			if err := gitRepo.DeleteReference(policyPkg.PolicyStagingRef); err != nil {
+				cmd.Printf("Warning: could not clean up staging ref: %v\n", err)
+			}
 
 			cmd.Println("Policy applied successfully.")
 			return nil
@@ -478,26 +481,5 @@ func saveTargetsToStaging(repo *gitinterface.Repository, root *tufv01.RootMetada
 }
 
 func loadSSHPublicKey(path string) (*common.SSLibKey, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading key file: %w", err)
-	}
-
-	keyContent := string(data)
-	keyID := fmt.Sprintf("ssh:%x", sha256Short(data))
-
-	return &common.SSLibKey{
-		KeyID:   keyID,
-		KeyType: common.SSHKeyType,
-		KeyVal:  common.KeyVal{Public: keyContent},
-		Scheme:  common.SSHSigningScheme,
-	}, nil
-}
-
-func sha256Short(data []byte) []byte {
-	h := make([]byte, 8)
-	for i, b := range data {
-		h[i%8] ^= b
-	}
-	return h
+	return loader.LoadSSLibKeyFromPublicKeyFile(path)
 }

@@ -7,6 +7,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+
+	"github.com/jjtuf/jjtuf/internal/signerverifier/common"
 )
 
 var (
@@ -88,6 +91,97 @@ func PAE(payloadType string, payload []byte) []byte {
 	result = append(result, ' ')
 	result = append(result, payload...)
 	return result
+}
+
+// Sign signs the envelope using the given signer. The signature is computed
+// over PAE(payloadType, rawPayload) and appended to the envelope's Signatures
+// slice. It is safe to call Sign multiple times with different signers.
+func (e *Envelope) Sign(signer common.SignerVerifier) error {
+	rawPayload, err := e.DecodePayload()
+	if err != nil {
+		return fmt.Errorf("decoding payload for signing: %w", err)
+	}
+	pae := PAE(e.PayloadType, rawPayload)
+	sig, err := signer.Sign(pae)
+	if err != nil {
+		return fmt.Errorf("signing envelope: %w", err)
+	}
+	e.AddSignature(signer.KeyID(), sig)
+	return nil
+}
+
+// VerifySignatures verifies every signature in the envelope against the
+// provided set of public keys. It returns the key IDs whose signatures are
+// cryptographically valid. Invalid signatures are silently skipped — callers
+// that need a threshold check should compare len(return value) to the
+// threshold themselves. At least one valid signature is required; an error is
+// returned if the envelope has no signatures or none of them verify.
+func (e *Envelope) VerifySignatures(keys []*common.SSLibKey, loaders ...VerifierLoader) ([]string, error) {
+	if len(e.Signatures) == 0 {
+		return nil, ErrNoSignatures
+	}
+
+	rawPayload, err := e.DecodePayload()
+	if err != nil {
+		return nil, fmt.Errorf("decoding payload for verification: %w", err)
+	}
+	pae := PAE(e.PayloadType, rawPayload)
+
+	// Build an index from key ID → key for O(1) lookup.
+	keyByID := make(map[string]*common.SSLibKey, len(keys))
+	for _, k := range keys {
+		keyByID[k.KeyID] = k
+	}
+
+	var validKeyIDs []string
+	for _, sig := range e.Signatures {
+		key, ok := keyByID[sig.KeyID]
+		if !ok {
+			continue // signature from unknown key, skip
+		}
+
+		var loader VerifierLoader = defaultLoader
+		if len(loaders) > 0 && loaders[0] != nil {
+			loader = loaders[0]
+		}
+		verifier, err := loader(key)
+		if err != nil {
+			continue // can't construct verifier, skip
+		}
+
+		sigBytes, err := base64.StdEncoding.DecodeString(sig.Sig)
+		if err != nil {
+			continue
+		}
+
+		if err := verifier.Verify(pae, sigBytes); err == nil {
+			validKeyIDs = append(validKeyIDs, sig.KeyID)
+		}
+	}
+
+	if len(validKeyIDs) == 0 {
+		return nil, fmt.Errorf("%w: no valid signatures found in envelope", common.ErrVerificationFailed)
+	}
+	return validKeyIDs, nil
+}
+
+// VerifierLoader is a function that produces a SignerVerifier from a key.
+// Callers can inject their own loader for testing; production code should use
+// the default (which delegates to the loader package).
+type VerifierLoader func(key *common.SSLibKey) (common.SignerVerifier, error)
+
+// defaultLoader is set via SetDefaultLoader to break the import cycle between
+// dsse and loader. Call SetDefaultLoader once at program startup.
+var defaultLoader VerifierLoader = func(key *common.SSLibKey) (common.SignerVerifier, error) {
+	return nil, fmt.Errorf("no default verifier loader configured; call dsse.SetDefaultLoader first")
+}
+
+// SetDefaultLoader registers the production verifier loader. Call this once,
+// early in main() or in an init() of the cmd package:
+//
+//	dsse.SetDefaultLoader(loader.LoadVerifierFromSSLibKey)
+func SetDefaultLoader(fn VerifierLoader) {
+	defaultLoader = fn
 }
 
 func itoa(n int) string {

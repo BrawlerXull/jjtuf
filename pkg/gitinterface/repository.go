@@ -61,7 +61,7 @@ func (r *Repository) executor(args ...string) (string, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), string(exitErr.Stderr))
+			return "", formatExitError(args, exitErr)
 		}
 		return "", err
 	}
@@ -79,7 +79,7 @@ func (r *Repository) executorWithStdin(stdin string, args ...string) (string, er
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), string(exitErr.Stderr))
+			return "", formatExitError(args, exitErr)
 		}
 		return "", err
 	}
@@ -114,6 +114,17 @@ func resolveGitDir(path string) (string, error) {
 	}
 
 	return gitDir, nil
+}
+
+// formatExitError formats an ExitError from a git command.
+// When stderr is empty (e.g., git merge-base --is-ancestor exits with code 1),
+// the exit code is included so callers can distinguish it from a fatal error.
+func formatExitError(args []string, exitErr *exec.ExitError) error {
+	stderr := strings.TrimSpace(string(exitErr.Stderr))
+	if stderr == "" {
+		return fmt.Errorf("git %s: exit status %d", strings.Join(args, " "), exitErr.ExitCode())
+	}
+	return fmt.Errorf("git %s: %s", strings.Join(args, " "), stderr)
 }
 
 // isGitDir checks if a path looks like a git directory.

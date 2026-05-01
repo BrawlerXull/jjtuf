@@ -13,6 +13,7 @@ import (
 	"github.com/jjtuf/jjtuf/internal/jjinterface"
 	"github.com/jjtuf/jjtuf/internal/signerverifier/common"
 	"github.com/jjtuf/jjtuf/internal/signerverifier/dsse"
+	"github.com/jjtuf/jjtuf/internal/signerverifier/loader"
 	tufv01 "github.com/jjtuf/jjtuf/internal/tuf/v01"
 	"github.com/jjtuf/jjtuf/pkg/gitinterface"
 )
@@ -32,6 +33,7 @@ func New() *cobra.Command {
 
 	cmd.AddCommand(initCmd())
 	cmd.AddCommand(addRootKeyCmd())
+	cmd.AddCommand(addSigstoreKeyCmd())
 	cmd.AddCommand(addGlobalRuleCmd())
 	cmd.AddCommand(removeGlobalRuleCmd())
 	cmd.AddCommand(updateThresholdCmd())
@@ -41,22 +43,24 @@ func New() *cobra.Command {
 }
 
 func initCmd() *cobra.Command {
-	var keyPath string
+	var (
+		keyPath        string
+		signingKeyPath string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Initialize jjtuf metadata in a jj repository",
 		Long: `Initialize jjtuf in the current jj repository by creating
 the root of trust metadata. This sets up the policy reference
-(refs/jjtuf/policy) with the initial root metadata signed by
-the specified key.`,
+(refs/jjtuf/policy) with the initial root metadata, optionally
+signed by the specified key.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
 				return fmt.Errorf("getting working directory: %w", err)
 			}
 
-			// Load jj repository
 			jjRepo, err := jjinterface.LoadJJRepository(cwd)
 			if err != nil {
 				return fmt.Errorf("loading jj repository: %w", err)
@@ -64,21 +68,17 @@ the specified key.`,
 
 			gitRepo := jjRepo.GetGitRepository()
 
-			// Check if already initialized
 			if _, err := gitRepo.GetReference(policyRef); err == nil {
 				return fmt.Errorf("jjtuf is already initialized (refs/jjtuf/policy exists)")
 			}
 
-			// Create root metadata
 			rootMd := tufv01.NewRootMetadata()
 
-			// If a key is provided, add it as root principal
 			if keyPath != "" {
-				key, err := loadSSHPublicKey(keyPath)
+				key, err := loader.LoadSSLibKeyFromPublicKeyFile(keyPath)
 				if err != nil {
 					return fmt.Errorf("loading key: %w", err)
 				}
-
 				principal := tufv01.NewPrincipal("root", []*common.SSLibKey{key})
 				if err := rootMd.AddRootPrincipal(principal); err != nil {
 					return fmt.Errorf("adding root principal: %w", err)
@@ -88,26 +88,32 @@ the specified key.`,
 				}
 			}
 
-			// Serialize root metadata
 			rootBytes, err := rootMd.Marshal()
 			if err != nil {
 				return fmt.Errorf("serializing root metadata: %w", err)
 			}
 
-			// Wrap in DSSE envelope
 			env := dsse.NewEnvelope("application/vnd.jjtuf.root+json", rootBytes)
+			if signingKeyPath != "" {
+				signer, err := loader.LoadSignerVerifierFromFile(signingKeyPath)
+				if err != nil {
+					return fmt.Errorf("loading signing key: %w", err)
+				}
+				if err := env.Sign(signer); err != nil {
+					return fmt.Errorf("signing root metadata: %w", err)
+				}
+			}
+
 			envBytes, err := env.Marshal()
 			if err != nil {
 				return fmt.Errorf("creating DSSE envelope: %w", err)
 			}
 
-			// Write root metadata as a blob
 			rootBlobID, err := gitRepo.WriteBlob(envBytes)
 			if err != nil {
 				return fmt.Errorf("writing root blob: %w", err)
 			}
 
-			// Create tree with root metadata
 			tb := gitinterface.NewTreeBuilder(gitRepo)
 			treeID, err := tb.WriteRootTreeFromBlobIDs(map[string]gitinterface.Hash{
 				rootMetadataPath: rootBlobID,
@@ -116,7 +122,6 @@ the specified key.`,
 				return fmt.Errorf("creating metadata tree: %w", err)
 			}
 
-			// Create initial commit on policy ref
 			_, err = gitRepo.Commit(treeID, policyRef, "Initialize jjtuf root of trust", false)
 			if err != nil {
 				return fmt.Errorf("creating policy commit: %w", err)
@@ -133,7 +138,8 @@ the specified key.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&keyPath, "key-path", "", "Path to initial root SSH public key")
+	cmd.Flags().StringVar(&keyPath, "key-path", "", "Path to initial root public key (SSH authorized_keys or PEM PUBLIC KEY)")
+	cmd.Flags().StringVar(&signingKeyPath, "signing-key", "", "Path to private key to sign the root metadata (optional)")
 
 	return cmd
 }
@@ -165,7 +171,7 @@ func addRootKeyCmd() *cobra.Command {
 			}
 
 			// Load the key
-			key, err := loadSSHPublicKey(keyPath)
+			key, err := loader.LoadSSLibKeyFromPublicKeyFile(keyPath)
 			if err != nil {
 				return fmt.Errorf("loading key: %w", err)
 			}
@@ -192,6 +198,92 @@ func addRootKeyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&keyPath, "key-path", "", "Path to SSH public key (required)")
 	cmd.Flags().StringVar(&principalName, "name", "", "Principal name (defaults to key ID)")
 	_ = cmd.MarkFlagRequired("key-path")
+
+	return cmd
+}
+
+func addSigstoreKeyCmd() *cobra.Command {
+	var (
+		identity      string
+		issuer        string
+		principalName string
+		asPolicy      bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "add-sigstore-key",
+		Short: "Add a Sigstore keyless identity as a trusted principal",
+		Long: `Registers a Sigstore (Fulcio/OIDC) identity in the root of trust.
+Signatures made by this identity are verified against the Sigstore
+public-good infrastructure (Rekor + Fulcio) at verification time.
+
+Example:
+  jjtuf trust add-sigstore-key \
+    --identity alice@example.com \
+    --issuer https://accounts.google.com \
+    --name alice`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+
+			jjRepo, err := jjinterface.LoadJJRepository(cwd)
+			if err != nil {
+				return fmt.Errorf("loading jj repository: %w", err)
+			}
+
+			gitRepo := jjRepo.GetGitRepository()
+
+			rootMd, err := loadRootMetadata(gitRepo)
+			if err != nil {
+				return fmt.Errorf("loading root metadata: %w", err)
+			}
+
+			keyID := fmt.Sprintf("%s::%s", identity, issuer)
+			key := &common.SSLibKey{
+				KeyID:   keyID,
+				KeyType: common.SigstoreKeyType,
+				Scheme:  common.FulcioSigningScheme,
+				KeyVal: common.KeyVal{
+					Identity: identity,
+					Issuer:   issuer,
+				},
+			}
+
+			if principalName == "" {
+				principalName = keyID
+			}
+
+			principal := tufv01.NewPrincipal(principalName, []*common.SSLibKey{key})
+			if err := rootMd.AddRootPrincipal(principal); err != nil {
+				return fmt.Errorf("adding root principal: %w", err)
+			}
+			if asPolicy {
+				if err := rootMd.AddPrimaryRuleFilePrincipal(principal); err != nil {
+					return fmt.Errorf("adding policy principal: %w", err)
+				}
+			}
+
+			if err := saveRootMetadata(gitRepo, rootMd); err != nil {
+				return fmt.Errorf("saving root metadata: %w", err)
+			}
+
+			cmd.Printf("Added Sigstore principal %q (identity: %s, issuer: %s)\n",
+				principalName, identity, issuer)
+			if asPolicy {
+				cmd.Println("Principal also added as a policy signer.")
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&identity, "identity", "", "OIDC subject (email or sub claim) of the signer (required)")
+	cmd.Flags().StringVar(&issuer, "issuer", "", "OIDC issuer URL (e.g. https://accounts.google.com) (required)")
+	cmd.Flags().StringVar(&principalName, "name", "", "Principal name (defaults to identity::issuer)")
+	cmd.Flags().BoolVar(&asPolicy, "policy", false, "Also add as a policy-signing principal")
+	_ = cmd.MarkFlagRequired("identity")
+	_ = cmd.MarkFlagRequired("issuer")
 
 	return cmd
 }
@@ -495,32 +587,6 @@ func saveRootMetadata(repo *gitinterface.Repository, rootMd *tufv01.RootMetadata
 
 	_, err = repo.Commit(treeID, policyRef, "Update root of trust metadata", false)
 	return err
-}
-
-func loadSSHPublicKey(path string) (*common.SSLibKey, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading key file: %w", err)
-	}
-
-	keyContent := string(data)
-	keyID := fmt.Sprintf("ssh:%x", sha256Short(data))
-
-	return &common.SSLibKey{
-		KeyID:   keyID,
-		KeyType: common.SSHKeyType,
-		KeyVal:  common.KeyVal{Public: keyContent},
-		Scheme:  common.SSHSigningScheme,
-	}, nil
-}
-
-func sha256Short(data []byte) []byte {
-	// Use a simple hash for key ID
-	h := make([]byte, 8)
-	for i, b := range data {
-		h[i%8] ^= b
-	}
-	return h
 }
 
 // ensure json is used (for potential future use)

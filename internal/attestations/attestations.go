@@ -11,9 +11,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path"
 	"strings"
 
+	"github.com/jjtuf/jjtuf/internal/signerverifier/common"
 	"github.com/jjtuf/jjtuf/internal/signerverifier/dsse"
 	"github.com/jjtuf/jjtuf/pkg/gitinterface"
 )
@@ -98,15 +100,33 @@ func LoadAttestationsFromCommit(repo *gitinterface.Repository, commitID gitinter
 	return attestations, nil
 }
 
+// NormalizeFromID maps the various sentinels jj/jjtuf may emit for a
+// "no parent" bookmark transition to a single canonical empty-string form.
+// Both attestation storage and lookup MUST go through this function or the
+// path written by the producer will not match the path looked up by the
+// verifier — silently dropping the attestation from threshold checks.
+//
+// Inputs that all collapse to "":
+//   - empty / whitespace-only
+//   - any all-zeros hex string (e.g. "0000…0", "0", "00")
+func NormalizeFromID(fromID string) string {
+	trimmed := strings.TrimSpace(fromID)
+	if strings.Trim(trimmed, "0") == "" {
+		return ""
+	}
+	return trimmed
+}
+
 // ReferenceAuthorizationPath returns the storage path for a reference
-// authorization attestation.
+// authorization attestation. fromID is normalized so that all "no parent"
+// sentinels resolve to the same path.
 func ReferenceAuthorizationPath(bookmarkName, fromID, toTreeID string) string {
-	return path.Join(bookmarkName, fmt.Sprintf("%s-%s", fromID, toTreeID))
+	return path.Join(bookmarkName, fmt.Sprintf("%s-%s", NormalizeFromID(fromID), toTreeID))
 }
 
 // CodeReviewApprovalPath returns the storage path for a code review approval.
 func CodeReviewApprovalPath(bookmarkName, fromID, toTreeID, system string) string {
-	return path.Join(bookmarkName, fmt.Sprintf("%s-%s", fromID, toTreeID), system)
+	return path.Join(bookmarkName, fmt.Sprintf("%s-%s", NormalizeFromID(fromID), toTreeID), system)
 }
 
 // SetReferenceAuthorization stores a reference authorization attestation.
@@ -142,15 +162,36 @@ func (a *Attestations) GetReferenceAuthorizationFor(repo *gitinterface.Repositor
 	return dsse.Unmarshal(envBytes)
 }
 
-// GetSignerKeyIDsForAuthorization returns the key IDs of all signers on the
-// reference authorization for the given bookmark transition.
-func (a *Attestations) GetSignerKeyIDsForAuthorization(repo *gitinterface.Repository, bookmarkName, fromID, toTreeID string) ([]string, error) {
+// GetSignerKeyIDsForAuthorization returns the key IDs whose signatures on the
+// reference authorization for the given bookmark transition are cryptographically
+// valid against the supplied policy keys.
+//
+// If policyKeys is nil or empty the function falls back to returning all
+// claimed key IDs without verification — useful during bootstrap when no
+// policy is loaded yet (the caller is responsible for deciding trust).
+func (a *Attestations) GetSignerKeyIDsForAuthorization(repo *gitinterface.Repository, bookmarkName, fromID, toTreeID string, policyKeys ...[]*common.SSLibKey) ([]string, error) {
 	env, err := a.GetReferenceAuthorizationFor(repo, bookmarkName, fromID, toTreeID)
 	if err != nil {
 		return nil, err
 	}
 
-	return env.GetSignerKeyIDs(), nil
+	// Flatten the variadic policy-keys argument.
+	var keys []*common.SSLibKey
+	for _, ks := range policyKeys {
+		keys = append(keys, ks...)
+	}
+
+	if len(keys) == 0 {
+		// No keys to verify against — return claimed IDs as-is.
+		slog.Debug("GetSignerKeyIDsForAuthorization: no policy keys supplied, returning unverified key IDs")
+		return env.GetSignerKeyIDs(), nil
+	}
+
+	validKeyIDs, err := env.VerifySignatures(keys)
+	if err != nil {
+		return nil, fmt.Errorf("verifying authorization signatures: %w", err)
+	}
+	return validKeyIDs, nil
 }
 
 // SetCodeReviewApproval stores a code review approval attestation.

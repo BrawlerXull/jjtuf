@@ -365,6 +365,28 @@ func (p *PropagationEntry) createCommitMessage(includeNumber bool) (string, erro
 	return strings.Join(lines, "\n"), nil
 }
 
+// IsOperationIDRecorded returns true if the given jj operation ID is already
+// present in the OSL. Used to prevent duplicate entries when osl record is
+// called more than once without intervening jj operations.
+func IsOperationIDRecorded(repo *gitinterface.Repository, operationID string) (bool, error) {
+	found := false
+	err := IterateEntries(repo, func(entry Entry) bool {
+		opEntry, ok := entry.(*OperationEntry)
+		if !ok {
+			return true
+		}
+		if opEntry.OperationID == operationID {
+			found = true
+			return false
+		}
+		return true
+	})
+	if err != nil && !errors.Is(err, ErrOSLEntryNotFound) {
+		return false, err
+	}
+	return found, nil
+}
+
 // GetLatestEntry returns the most recent entry in the OSL.
 func GetLatestEntry(repo *gitinterface.Repository) (Entry, error) {
 	tipID, err := repo.GetReference(Ref)

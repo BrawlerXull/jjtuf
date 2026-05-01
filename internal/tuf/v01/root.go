@@ -289,6 +289,12 @@ var (
 	_ tuf.GlobalRule   = (*globalRule)(nil)
 )
 
+// NewGlobalRule creates a GlobalRule with the given type, name, and patterns.
+// Use tuf.GlobalRuleBlockForcePushesType as ruleType for force-push protection.
+func NewGlobalRule(ruleType, name string, patterns []string) tuf.GlobalRule {
+	return &globalRule{RuleName: name, RuleType: ruleType, RulePatterns: patterns}
+}
+
 // NewPrincipal creates a PersonPrincipal from an ID and keys.
 func NewPrincipal(id string, keys []*common.SSLibKey) *PersonPrincipal {
 	return &PersonPrincipal{
