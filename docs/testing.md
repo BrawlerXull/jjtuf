@@ -192,21 +192,36 @@ go run ./experimental/tamper-attestation /path/to/test/repo
 
 # GPG integration tests (require system gpg)
 go test -tags integration ./internal/signerverifier/gpg/...
+
+# Audit harness (the same checks the independent audits ran)
+experimental/audit/regress-crit1.sh        # FromID symmetry regression
+experimental/audit/regress-crit2.sh        # force-push-without-targets regression
+experimental/audit/feature-coverage.sh     # full 29-item feature audit
 ```
 
-## Audit prompts
+## Audit harness
 
-The exact prompts used to drive the independent audits live in this repository's design history (the chat transcripts that produced them are not committed). The pattern, if you want to reproduce it:
+The independent audits described below were originally driven by skeptical-prompt-driven Claude sessions. The same checks are now codified as runnable bash scripts under `experimental/audit/`, so anyone can re-verify jjtuf locally without spinning up a fresh agent.
+
+| Script | Purpose |
+|---|---|
+| `feature-coverage.sh` | The full 29-item audit — root of trust, policy, OSL, attestations, crypto, verification, operational. Prints a PASS/FAIL/SKIP table; exits non-zero on any failure. |
+| `regress-crit1.sh` | Pins the FromID path-symmetry fix: attestations stored with `--from "0000…0"` and `--from ""` resolve to the same envelope, and `verify ref` exits 0 in both forms. |
+| `regress-crit2.sh` | Pins the global-rule-without-targets fix: `block-force-pushes` fires under a "trust init only" deployment, with a fast-forward negative control. |
+
+See `experimental/audit/README.md` for usage details and the coverage map.
+
+If you want to drive a *fresh* audit (an LLM session with no shared context), the pattern is:
 
 1. Open a fresh Claude Code session with no prior context for this project.
 2. Paste a self-contained prompt that:
    - States the project path
-   - Lists the features to verify (with traceable command sequences)
+   - Lists the features to verify (with traceable command sequences — the scripts under `experimental/audit/` are a good starting point)
    - Demands evidence (quoted command output) for every claim
    - Tells the agent to be skeptical and not trust descriptions
 3. Forward the report back; cross-check every PASS / FAIL against actual repository state.
 
-The audit prompts produced reports of the form shown in the audit history above. The discipline of "don't trust the implementer; verify with `git ls-tree`, `git cat-file -p`, and `verify ref; echo $?`" is what surfaced both bugs.
+The discipline of "don't trust the implementer; verify with `git ls-tree`, `git cat-file -p`, and `verify ref; echo $?`" is what surfaced both bugs.
 
 ## Coverage gaps to know about
 
